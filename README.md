@@ -28,10 +28,17 @@ and not reachable remotely — only the promoted **team** and **org** tiers are.
 
 ## Configure (`wrangler.toml` vars)
 
+Team scope **auto-discovers** — it is a *growing* set, not a static list. Every
+repo owned by `TEAM_OWNER` that has a `TEAM_BRANCH` (i.e. has been
+team-promoted) is read, so a newly-promoted repo shows up on mobile within
+minutes with no redeploy. One GraphQL scan per few minutes (cached in-isolate)
+lists the repos; a repo without the branch is simply skipped.
+
 | var | meaning |
 |---|---|
 | `ORG_REPO` | `owner/name` of the dedicated org knowledge repo (its default branch's `knowledge.json`). Blank = no org recall. |
-| `TEAM_REPOS` | comma-separated `owner/name` repos whose `TEAM_BRANCH` holds team knowledge. Blank = no team recall. |
+| `TEAM_OWNER` | owner (user/org) to auto-discover team repos under. Every repo of theirs with `TEAM_BRANCH` is read. Blank = no team recall. |
+| `TEAM_REPOS` | **optional** extra `owner/name` repos to include on top of discovery (e.g. under a different owner). Blank in the common case. |
 | `TEAM_BRANCH` | team-scope branch (default `cambium`). |
 | `KNOWLEDGE_PATH` | file name (default `knowledge.json`). |
 
@@ -43,7 +50,8 @@ npm run typecheck && npm test
 npx wrangler deploy
 # then set the two secrets in the Cloudflare dashboard (never in the repo):
 npx wrangler secret put AUTH_TOKEN   # the path-token credential; URL is /mcp/<AUTH_TOKEN>
-npx wrangler secret put GH_PAT       # fine-grained GitHub token, Contents: Read, scoped to ORG_REPO + TEAM_REPOS
+npx wrangler secret put GH_PAT       # fine-grained GitHub token: Metadata: Read + Contents: Read across your repos
+#                                    # (team scope is auto-discovered, so it needs to see all of TEAM_OWNER's repos)
 ```
 
 Then add `https://cambium-remote.<subdomain>.workers.dev/mcp/<AUTH_TOKEN>` as a

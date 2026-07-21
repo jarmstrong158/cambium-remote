@@ -3,7 +3,7 @@
 // be a CAS write to the shared branch), which also means mobile recalls do not
 // feed promotion — consistent with local cambium not tracking org-scope usage.
 
-import { getContent, getDefaultBranch } from "./github.js";
+import { discoverTeamRepos, getContent, getDefaultBranch } from "./github.js";
 import { RELEVANCE_FLOOR, score, tokens } from "./score.js";
 import type { Ctx, Env, KnowledgeItem } from "./types.js";
 
@@ -11,6 +11,7 @@ export function buildCtx(env: Env): Ctx {
   return {
     env,
     orgRepo: (env.ORG_REPO || "").trim(),
+    teamOwner: (env.TEAM_OWNER || "").trim(),
     teamRepos: (env.TEAM_REPOS || "")
       .split(",")
       .map((s) => s.trim())
@@ -19,6 +20,31 @@ export function buildCtx(env: Env): Ctx {
     knowledgePath: (env.KNOWLEDGE_PATH || "knowledge.json").trim(),
     now: () => new Date().toISOString(),
   };
+}
+
+// Team scope is a GROWING set, so we discover it (see github.discoverTeamRepos)
+// rather than read a static list. Discovery is cached per (owner, branch) in the
+// isolate for a few minutes so a burst of recalls costs one scan, and a newly
+// team-promoted repo shows up within the TTL — no redeploy, no config edit.
+const TEAM_CACHE_TTL_MS = 5 * 60 * 1000;
+const teamRepoCache = new Map<string, { at: number; repos: string[] }>();
+
+/** The full team-repo set for this ctx: auto-discovered under TEAM_OWNER, plus
+ *  any explicit TEAM_REPOS extras, deduped. */
+async function resolveTeamRepos(ctx: Ctx): Promise<string[]> {
+  let discovered: string[] = [];
+  if (ctx.teamOwner) {
+    const key = `${ctx.teamOwner}|${ctx.teamBranch}`;
+    const hit = teamRepoCache.get(key);
+    const now = Date.now();
+    if (hit && now - hit.at < TEAM_CACHE_TTL_MS) {
+      discovered = hit.repos;
+    } else {
+      discovered = await discoverTeamRepos(ctx, ctx.teamOwner, ctx.teamBranch);
+      teamRepoCache.set(key, { at: now, repos: discovered });
+    }
+  }
+  return [...new Set([...discovered, ...ctx.teamRepos])];
 }
 
 /** Read one repo's knowledge.json at a ref into its items array (empty on
@@ -43,7 +69,7 @@ async function gather(
 ): Promise<Array<{ scope: string; item: KnowledgeItem }>> {
   const pool: Array<{ scope: string; item: KnowledgeItem }> = [];
   if (wantTeam) {
-    for (const repo of ctx.teamRepos) {
+    for (const repo of await resolveTeamRepos(ctx)) {
       for (const item of await readItems(ctx, repo, ctx.teamBranch)) {
         pool.push({ scope: "team", item });
       }
@@ -108,7 +134,7 @@ export async function recall(ctx: Ctx, args: any): Promise<unknown> {
     results,
     top_relevance: round3(top),
     scopes_read: {
-      team: wantTeam ? ctx.teamRepos.length : 0,
+      team: wantTeam && (!!ctx.teamOwner || ctx.teamRepos.length > 0),
       org: wantOrg && !!ctx.orgRepo,
     },
     note: "read-only remote recall (team + org). local scope is desktop-only; this recall did not increment recall counts.",
@@ -122,7 +148,8 @@ export async function recall(ctx: Ctx, args: any): Promise<unknown> {
 }
 
 export async function status(ctx: Ctx): Promise<unknown> {
-  const team = ctx.teamRepos.length ? await gather(ctx, true, false) : [];
+  const teamRepos = await resolveTeamRepos(ctx);
+  const team = teamRepos.length ? await gather(ctx, true, false) : [];
   const org = ctx.orgRepo ? await gather(ctx, false, true) : [];
   const activeOf = (arr: Array<{ item: KnowledgeItem }>) =>
     arr.filter((p) => (p.item.status || "active") === "active").length;
@@ -130,14 +157,16 @@ export async function status(ctx: Ctx): Promise<unknown> {
     server: "cambium-remote",
     configured: {
       org_repo: ctx.orgRepo || null,
-      team_repos: ctx.teamRepos,
+      team_owner: ctx.teamOwner || null, // team repos are auto-discovered under this owner
+      team_repos_discovered: teamRepos, // grows automatically as repos are team-promoted
       team_branch: ctx.teamBranch,
       knowledge_path: ctx.knowledgePath,
     },
     counts: {
+      team_repos: teamRepos.length,
       team_active: activeOf(team),
       org_active: activeOf(org),
     },
-    note: "Read-only recall Worker. Writes (endorse/promote/distill) are desktop-only.",
+    note: "Read-only recall Worker; team repos auto-discovered. Writes (endorse/promote/distill) are desktop-only.",
   };
 }

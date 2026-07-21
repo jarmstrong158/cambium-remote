@@ -30,17 +30,20 @@ vi.mock("../src/github.js", () => {
     getContent: async (_ctx: unknown, repo: string, _path: string, ref: string) =>
       store[`${repo}|${ref}`] ?? null,
     getDefaultBranch: async () => "main",
+    // Team scope auto-discovers repos with a cambium branch; the mock returns
+    // the one team repo in the store, as a real scan would.
+    discoverTeamRepos: async () => ["team/repo"],
   };
 });
 
-import { buildCtx, recall } from "../src/tools.js";
+import { buildCtx, recall, status } from "../src/tools.js";
 
 describe("recall", () => {
   let ctx: ReturnType<typeof buildCtx>;
   beforeEach(() => {
     ctx = buildCtx({
       ORG_REPO: "org/knowledge",
-      TEAM_REPOS: "team/repo",
+      TEAM_OWNER: "team", // team repos are auto-discovered under this owner
       TEAM_BRANCH: "cambium",
       KNOWLEDGE_PATH: "knowledge.json",
     } as any);
@@ -71,5 +74,12 @@ describe("recall", () => {
   it("rejects a bad scope", async () => {
     const r: any = await recall(ctx, { query: "x", scope: "local" });
     expect(r.error).toMatch(/scope must be/);
+  });
+
+  it("auto-discovers team repos (not a static list)", async () => {
+    const s: any = await status(ctx);
+    expect(s.configured.team_owner).toBe("team");
+    expect(s.configured.team_repos_discovered).toContain("team/repo");
+    expect(s.counts.team_active).toBe(1); // t1 active; t2 deprecated is excluded
   });
 });

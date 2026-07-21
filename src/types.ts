@@ -39,7 +39,11 @@ export interface Env {
   GH_PAT?: string;
   // Vars (wrangler.toml).
   ORG_REPO?: string; // "owner/name" of the dedicated org knowledge repo
-  TEAM_REPOS?: string; // comma-separated "owner/name" list; team knowledge is on each's TEAM_BRANCH
+  TEAM_OWNER?: string; // owner (user/org) to AUTO-DISCOVER team repos under:
+  //   every repo of this owner that has a TEAM_BRANCH is read for team knowledge,
+  //   so newly-promoted repos are picked up with no config change.
+  TEAM_REPOS?: string; // OPTIONAL extra "owner/name" repos to include on top of
+  //   discovery (e.g. repos under a different owner). Blank in the common case.
   TEAM_BRANCH?: string; // default "cambium"
   KNOWLEDGE_PATH?: string; // default "knowledge.json"
 }
@@ -49,7 +53,8 @@ export interface Env {
 export interface Ctx {
   env: Env;
   orgRepo: string; // "" if unconfigured
-  teamRepos: string[];
+  teamOwner: string; // "" if team discovery is off
+  teamRepos: string[]; // explicit extras, merged on top of discovery
   teamBranch: string;
   knowledgePath: string;
   now: () => string;

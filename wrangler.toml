@@ -6,8 +6,12 @@ compatibility_date = "2025-06-01"
 # The dedicated org knowledge repo ("owner/name"). Its default branch's
 # knowledge.json is the org-scope store. Leave blank to disable org recall.
 ORG_REPO = "jarmstrong158/knowledge"
-# Comma-separated "owner/name" repos whose TEAM_BRANCH holds team knowledge.
-# Leave blank to disable team recall. e.g. "jarmstrong158/xylem,jarmstrong158/cambium"
+# Team scope AUTO-DISCOVERS: every repo owned by TEAM_OWNER that has a
+# TEAM_BRANCH is read for team knowledge, so a newly team-promoted repo is
+# picked up within minutes with no redeploy. This is a growing set, not a list.
+TEAM_OWNER = "jarmstrong158"
+# Optional extra repos to include on top of discovery (e.g. under a different
+# owner). Blank in the common case.
 TEAM_REPOS = ""
 TEAM_BRANCH = "cambium"
 KNOWLEDGE_PATH = "knowledge.json"
@@ -17,4 +21,5 @@ enabled = true
 
 # Secrets (set in the Cloudflare dashboard, NEVER here):
 #   AUTH_TOKEN  the path-token credential (URL is /mcp/<AUTH_TOKEN>)
-#   GH_PAT      fine-grained GitHub token, Contents: Read, scoped to ORG_REPO + TEAM_REPOS
+#   GH_PAT      fine-grained GitHub token: Metadata: Read + Contents: Read across
+#               TEAM_OWNER's repos (team scope auto-discovers, so it must see them all)
