@@ -1,0 +1,20 @@
+name = "cambium-remote"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+[vars]
+# The dedicated org knowledge repo ("owner/name"). Its default branch's
+# knowledge.json is the org-scope store. Leave blank to disable org recall.
+ORG_REPO = "jarmstrong158/knowledge"
+# Comma-separated "owner/name" repos whose TEAM_BRANCH holds team knowledge.
+# Leave blank to disable team recall. e.g. "jarmstrong158/xylem,jarmstrong158/cambium"
+TEAM_REPOS = ""
+TEAM_BRANCH = "cambium"
+KNOWLEDGE_PATH = "knowledge.json"
+
+[observability]
+enabled = true
+
+# Secrets (set in the Cloudflare dashboard, NEVER here):
+#   AUTH_TOKEN  the path-token credential (URL is /mcp/<AUTH_TOKEN>)
+#   GH_PAT      fine-grained GitHub token, Contents: Read, scoped to ORG_REPO + TEAM_REPOS
