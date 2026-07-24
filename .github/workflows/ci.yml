@@ -1,0 +1,33 @@
+name: CI
+
+# Runs on every push and PR, in forks as well as the canonical repo. Unlike
+# deploy.yml this job is deliberately NOT gated on `github.repository`: a
+# self-hoster's fork should get the same signal we do.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Wrangler 4.x requires Node >= 22.
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npx vitest run
