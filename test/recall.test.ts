@@ -79,7 +79,64 @@ describe("recall", () => {
   it("auto-discovers team repos (not a static list)", async () => {
     const s: any = await status(ctx);
     expect(s.configured.team_owner).toBe("team");
-    expect(s.configured.team_repos_discovered).toContain("team/repo");
+    expect(s.configured.team_scope_mode).toBe("discover");
+    expect(s.counts.team_repos).toBe(1);
     expect(s.counts.team_active).toBe(1); // t1 active; t2 deprecated is excluded
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scope is a read selector, not authorization. See src/types.ts TeamScopeMode.
+// ---------------------------------------------------------------------------
+
+describe("team scope trust model", () => {
+  const base = {
+    ORG_REPO: "org/knowledge",
+    TEAM_OWNER: "team",
+    TEAM_BRANCH: "cambium",
+    KNOWLEDGE_PATH: "knowledge.json",
+  };
+
+  it("does not enumerate discovered repo names by default", async () => {
+    // Discovered names include PRIVATE repositories, and status() is reachable
+    // by anyone holding the path token -- who has no GitHub identity at all.
+    const s: any = await status(buildCtx(base as any));
+    expect(s.configured.team_repos).toMatch(/^hidden/);
+    expect(JSON.stringify(s)).not.toContain("team/repo");
+    // The count still answers the diagnostic question.
+    expect(s.counts.team_repos).toBe(1);
+  });
+
+  it("discloses names only when explicitly opted in", async () => {
+    const s: any = await status(buildCtx({ ...base, STATUS_DISCLOSE_REPOS: "true" } as any));
+    expect(s.configured.team_repos).toContain("team/repo");
+  });
+
+  it("allowlist mode ignores TEAM_OWNER entirely and never scans", async () => {
+    // Leaving TEAM_OWNER set in wrangler.toml must not silently re-widen scope.
+    const ctx = buildCtx({ ...base, TEAM_SCOPE_MODE: "allowlist", TEAM_REPOS: "team/repo" } as any);
+    expect(ctx.teamOwner).toBe("");
+    const s: any = await status(ctx);
+    expect(s.configured.team_scope_mode).toBe("allowlist");
+    expect(s.configured.team_owner).toBeNull();
+    // Named repos are the operator's own committed config, so they are shown.
+    expect(s.configured.team_repos).toEqual(["team/repo"]);
+    expect(s.counts.team_active).toBe(1);
+  });
+
+  it("allowlist mode with no TEAM_REPOS reads nothing from team scope", async () => {
+    const ctx = buildCtx({ ...base, TEAM_SCOPE_MODE: "allowlist", TEAM_REPOS: "" } as any);
+    const r: any = await recall(ctx, { query: "blue-green deploy rollout", scope: "team" });
+    expect(r.results.length).toBe(0);
+  });
+
+  it("states the trust model in its own output rather than implying authorization", async () => {
+    const discovered: any = await status(buildCtx(base as any));
+    expect(discovered.trust_model).toMatch(/DISCOVERED, not authorized/);
+
+    const strict: any = await status(
+      buildCtx({ ...base, TEAM_SCOPE_MODE: "allowlist", TEAM_REPOS: "team/repo" } as any),
+    );
+    expect(strict.trust_model).toMatch(/strict allowlist/);
   });
 });

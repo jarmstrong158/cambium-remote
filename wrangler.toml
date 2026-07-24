@@ -6,15 +6,33 @@ compatibility_date = "2025-06-01"
 # The dedicated org knowledge repo ("owner/name"). Its default branch's
 # knowledge.json is the org-scope store. Leave blank to disable org recall.
 ORG_REPO = "jarmstrong158/knowledge"
-# Team scope AUTO-DISCOVERS: every repo owned by TEAM_OWNER that has a
-# TEAM_BRANCH is read for team knowledge, so a newly team-promoted repo is
-# picked up within minutes with no redeploy. This is a growing set, not a list.
+# How the team-repo set is chosen. THIS IS A TRUST DECISION -- see README
+# "Trust model".
+#   "discover"  (default) every repo owned by TEAM_OWNER that has a TEAM_BRANCH
+#               is read. A growing set, picked up within minutes with no
+#               redeploy. It is a READ SELECTOR, NOT AUTHORIZATION: anyone who
+#               can push a `cambium` branch to ANY repo under TEAM_OWNER gets
+#               their knowledge into org-wide recall. Safe only when you are the
+#               sole person who can push under that owner.
+#   "allowlist" team scope is EXACTLY the repos listed in TEAM_REPOS. No
+#               discovery is performed and TEAM_OWNER is ignored entirely.
+#               Use this if anyone else can push under TEAM_OWNER.
+TEAM_SCOPE_MODE = "discover"
+
+# The owner to auto-discover under. Ignored when TEAM_SCOPE_MODE = "allowlist".
 TEAM_OWNER = "jarmstrong158"
-# Optional extra repos to include on top of discovery (e.g. under a different
-# owner). Blank in the common case.
+# discover mode:  optional extra repos to include on top of discovery (e.g.
+#                 under a different owner). Blank in the common case.
+# allowlist mode: the COMPLETE team-scope set, comma-separated "owner/name".
 TEAM_REPOS = ""
 TEAM_BRANCH = "cambium"
 KNOWLEDGE_PATH = "knowledge.json"
+
+# May status() list team repo NAMES? Default false. In discover mode those names
+# are the output of a scan over everything TEAM_OWNER owns, so they enumerate
+# PRIVATE repositories to anyone holding the path token. The counts are returned
+# either way, which is what the diagnostic actually needs.
+STATUS_DISCLOSE_REPOS = "false"
 
 [observability]
 enabled = true
