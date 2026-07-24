@@ -12,6 +12,7 @@
 
 import { createMcpHandler } from "./mcp.js";
 import { log } from "./log.js";
+import { pathTokenMatches } from "./shared/mcp-core.js";
 import { buildCtx } from "./tools.js";
 import type { Env } from "./types.js";
 
@@ -19,13 +20,12 @@ const handleMcp = createMcpHandler();
 
 const NOT_FOUND = () => new Response("Not Found", { status: 404 });
 
-// Length-invariant comparison to avoid timing side channels on the token.
-function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
+// Token comparison lives in src/shared/mcp-core.ts (pathTokenMatches), shared
+// byte-identically with context-keeper-remote and agentsync-remote. The three
+// local copies it replaces all claimed to be kept in sync and all behaved
+// differently: this one never percent-decoded the path segment, and all three
+// early-returned on a length mismatch, leaking the token's length. That matters
+// most here -- this Worker holds the broadest GH_PAT of the three.
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -37,8 +37,8 @@ export default {
 
     if (!match) return NOT_FOUND();
 
-    const token = match[1];
-    const ok = !!env.AUTH_TOKEN && safeEqual(token, env.AUTH_TOKEN);
+    // Fail closed: unset AUTH_TOKEN or a mismatched token -> 404, no detail.
+    const ok = await pathTokenMatches(match[1], env.AUTH_TOKEN);
     log("auth", { ok });
     if (!ok) return NOT_FOUND();
 

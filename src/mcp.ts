@@ -5,18 +5,33 @@
 
 import { GhPatMissingError } from "./github.js";
 import { log } from "./log.js";
+import {
+  type JsonRpcMessage,
+  type JsonSchemaLike,
+  RPC_INVALID_PARAMS,
+  RPC_METHOD_NOT_FOUND,
+  handleJsonRpcHttp,
+  isNotification,
+  negotiateProtocol,
+  rpcError,
+  rpcResult,
+  validateArguments,
+} from "./shared/mcp-core.js";
 import { recall, status } from "./tools.js";
 import type { Ctx } from "./types.js";
 
-const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = { name: "cambium-remote", version: "0.1.0" };
 
 interface ToolDef {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  inputSchema: JsonSchemaLike;
   handler: (ctx: Ctx, args: any) => Promise<unknown>;
 }
+
+/** Longest query we will accept. A recall query is scored against every item in
+ *  every in-scope repo, so its length is a per-item cost multiplier. */
+const MAX_QUERY_LENGTH = 2000;
 
 export const TOOLS: ToolDef[] = [
   {
@@ -32,13 +47,23 @@ export const TOOLS: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "What you want to recall." },
+        query: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_QUERY_LENGTH,
+          description: "What you want to recall.",
+        },
         scope: {
           type: "string",
           enum: ["auto", "team", "org"],
           description: "auto (team+org, default) | team | org.",
         },
-        limit: { type: "number", description: "Max results (default 5, max 25)." },
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: 25,
+          description: "Max results (default 5, max 25).",
+        },
       },
       required: ["query"],
       additionalProperties: false,
@@ -57,45 +82,37 @@ export const TOOLS: ToolDef[] = [
 ];
 
 // --------------------------------------------------------------------------
-// JSON-RPC plumbing (identical to agentsync-remote's proven handler)
+// JSON-RPC plumbing
+//
+// The envelope, protocol negotiation and argument validation live in
+// src/shared/mcp-core.ts, shared byte-identically with context-keeper-remote
+// and agentsync-remote. This file used to say the plumbing was "identical to
+// agentsync-remote's proven handler"; it was a copy, and copies drift. Now it
+// is genuinely the same code.
 // --------------------------------------------------------------------------
-
-interface JsonRpcMessage {
-  jsonrpc?: string;
-  id?: string | number | null;
-  method?: string;
-  params?: any;
-}
-
-function result(id: string | number | null | undefined, res: unknown) {
-  return { jsonrpc: "2.0", id: id ?? null, result: res };
-}
-
-function error(id: string | number | null | undefined, code: number, message: string) {
-  return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
-}
 
 async function handleMessage(msg: JsonRpcMessage, ctx: Ctx): Promise<object | null> {
   const method = msg.method;
-  const isNotification = msg.id === undefined || method?.startsWith("notifications/");
 
   switch (method) {
     case "initialize": {
-      const requested =
-        typeof msg.params?.protocolVersion === "string" ? msg.params.protocolVersion : undefined;
-      const negotiated = requested ?? PROTOCOL_VERSION;
-      return result(msg.id, {
-        protocolVersion: negotiated,
+      // Previously echoed whatever the client sent, so asking for "banana"
+      // returned `protocolVersion: "banana"`. An unrecognized request now
+      // negotiates DOWN to our pinned revision.
+      const { version, requested, downgraded } = negotiateProtocol(msg.params?.protocolVersion);
+      log("handshake", { phase: "start", protocol_version: version, requested, downgraded });
+      return rpcResult(msg.id, {
+        protocolVersion: version,
         capabilities: { tools: {} },
         serverInfo: SERVER_INFO,
       });
     }
 
     case "ping":
-      return result(msg.id, {});
+      return rpcResult(msg.id, {});
 
     case "tools/list":
-      return result(msg.id, {
+      return rpcResult(msg.id, {
         tools: TOOLS.map((t) => ({
           name: t.name,
           description: t.description,
@@ -109,13 +126,29 @@ async function handleMessage(msg: JsonRpcMessage, ctx: Ctx): Promise<object | nu
       const tool = TOOLS.find((t) => t.name === name);
       if (!tool) {
         log("error", { message: `Unknown tool: ${name}` });
-        return error(msg.id, -32602, `Unknown tool: ${name}`);
+        return rpcError(msg.id, RPC_INVALID_PARAMS, `Unknown tool: ${name}`);
       }
+
+      // ENFORCE the schema we advertise. Handlers previously took
+      // `msg.params?.arguments ?? {}` raw, so a non-string `query` reached the
+      // scorer and a non-numeric `limit` reached Array.slice.
+      const args = msg.params?.arguments ?? {};
+      const problems = validateArguments(tool.inputSchema, args);
+      if (problems.length > 0) {
+        log("error", { message: `Invalid arguments for ${name}: ${problems.join("; ")}` });
+        return rpcError(
+          msg.id,
+          RPC_INVALID_PARAMS,
+          `Invalid arguments for ${name}: ${problems.join("; ")}`,
+        );
+      }
+
       try {
-        const out = await tool.handler(ctx, msg.params?.arguments ?? {});
+        const out = await tool.handler(ctx, args);
         log("tool_call", { tool: name, duration_ms: Date.now() - started, ok: true });
-        return result(msg.id, {
+        return rpcResult(msg.id, {
           content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
+          isError: false,
         });
       } catch (e) {
         const message =
@@ -124,58 +157,23 @@ async function handleMessage(msg: JsonRpcMessage, ctx: Ctx): Promise<object | nu
             : `Error: ${e instanceof Error ? e.message : String(e)}`;
         log("tool_call", { tool: name, duration_ms: Date.now() - started, ok: false });
         log("error", { message: e instanceof Error ? e.message : String(e) });
-        return result(msg.id, { content: [{ type: "text", text: message }], isError: true });
+        return rpcResult(msg.id, { content: [{ type: "text", text: message }], isError: true });
       }
     }
 
     default:
-      if (isNotification) return null;
-      return error(msg.id, -32601, `Method not found: ${method}`);
+      if (isNotification(msg)) return null;
+      return rpcError(msg.id, RPC_METHOD_NOT_FOUND, `Method not found: ${method}`);
   }
 }
 
 export function createMcpHandler(): (request: Request, ctx: Ctx) => Promise<Response> {
   return async (request: Request, ctx: Ctx): Promise<Response> => {
-    if (request.method === "GET") {
-      return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST, DELETE" } });
-    }
-    if (request.method === "DELETE") {
-      return new Response(null, { status: 204 });
-    }
-    if (request.method !== "POST") {
-      return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST, DELETE" } });
-    }
-
-    let payload: unknown;
-    try {
-      payload = await request.json();
-    } catch {
-      return json(error(null, -32700, "Parse error"), 200);
-    }
-
-    const isBatch = Array.isArray(payload);
-    const messages = (isBatch ? payload : [payload]) as JsonRpcMessage[];
-
-    const responses: object[] = [];
-    for (const message of messages) {
-      let res: object | null;
-      try {
-        res = await handleMessage(message, ctx);
-      } catch (e) {
-        log("error", { message: e instanceof Error ? e.message : String(e) });
-        res = error(message?.id ?? null, -32603, "Internal error");
-      }
-      if (res !== null) responses.push(res);
-    }
-
-    if (responses.length === 0) return new Response(null, { status: 202 });
-    return json(isBatch ? responses : responses[0], 200);
+    return handleJsonRpcHttp(request, (msg) => handleMessage(msg, ctx), {
+      // No server-initiated SSE stream and no session to tear down.
+      allow: "POST, DELETE",
+      handleDelete: true,
+      onError: (e) => log("error", { message: e instanceof Error ? e.message : String(e) }),
+    });
   };
-}
-
-function json(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
 }
