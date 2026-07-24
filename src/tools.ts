@@ -60,28 +60,49 @@ async function readItems(ctx: Ctx, repo: string, ref: string): Promise<Knowledge
   }
 }
 
-/** Gather (scope, item) pairs for the requested scopes. Team = each team repo's
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+interface Gathered {
+  pool: Array<{ scope: string; item: KnowledgeItem }>;
+  errors: Record<string, string>;
+}
+
+/** Gather (scope, item) pairs for the requested scopes, per-scope isolated: a
+ *  scope (or a single team repo) that fails — e.g. the GH_PAT can't see a
+ *  private repo — contributes nothing and is reported in `errors`, instead of
+ *  throwing and losing the scopes that DID succeed. Team = each team repo's
  *  cambium branch; org = the org repo's default branch. */
-async function gather(
-  ctx: Ctx,
-  wantTeam: boolean,
-  wantOrg: boolean,
-): Promise<Array<{ scope: string; item: KnowledgeItem }>> {
+async function gather(ctx: Ctx, wantTeam: boolean, wantOrg: boolean): Promise<Gathered> {
   const pool: Array<{ scope: string; item: KnowledgeItem }> = [];
+  const errors: Record<string, string> = {};
   if (wantTeam) {
-    for (const repo of await resolveTeamRepos(ctx)) {
-      for (const item of await readItems(ctx, repo, ctx.teamBranch)) {
-        pool.push({ scope: "team", item });
+    let repos: string[] = [];
+    try {
+      repos = await resolveTeamRepos(ctx);
+    } catch (e) {
+      errors.team_discovery = errMsg(e);
+    }
+    for (const repo of repos) {
+      try {
+        for (const item of await readItems(ctx, repo, ctx.teamBranch)) {
+          pool.push({ scope: "team", item });
+        }
+      } catch (e) {
+        errors[`team:${repo}`] = errMsg(e);
       }
     }
   }
   if (wantOrg && ctx.orgRepo) {
-    const branch = await getDefaultBranch(ctx, ctx.orgRepo);
-    for (const item of await readItems(ctx, ctx.orgRepo, branch)) {
-      pool.push({ scope: "org", item });
+    try {
+      const branch = await getDefaultBranch(ctx, ctx.orgRepo);
+      for (const item of await readItems(ctx, ctx.orgRepo, branch)) {
+        pool.push({ scope: "org", item });
+      }
+    } catch (e) {
+      errors.org = errMsg(e);
     }
   }
-  return pool;
+  return { pool, errors };
 }
 
 function endorsedNotes(item: KnowledgeItem): string[] {
@@ -103,7 +124,7 @@ export async function recall(ctx: Ctx, args: any): Promise<unknown> {
   const wantTeam = scope === "auto" || scope === "team";
   const wantOrg = scope === "auto" || scope === "org";
 
-  const pool = await gather(ctx, wantTeam, wantOrg);
+  const { pool, errors } = await gather(ctx, wantTeam, wantOrg);
   const scored = pool
     .filter((p) => (p.item.status || "active") === "active")
     .map((p) => ({ ...p, relevance: score(p.item, q) }))
@@ -139,6 +160,7 @@ export async function recall(ctx: Ctx, args: any): Promise<unknown> {
     },
     note: "read-only remote recall (team + org). local scope is desktop-only; this recall did not increment recall counts.",
   };
+  if (Object.keys(errors).length) out.scope_errors = errors; // e.g. a private repo the GH_PAT can't see
   if (!scored.length || top < RELEVANCE_FLOOR) {
     out.no_confident_match = true;
     out.guidance =
@@ -148,11 +170,17 @@ export async function recall(ctx: Ctx, args: any): Promise<unknown> {
 }
 
 export async function status(ctx: Ctx): Promise<unknown> {
-  const teamRepos = await resolveTeamRepos(ctx);
-  const team = teamRepos.length ? await gather(ctx, true, false) : [];
-  const org = ctx.orgRepo ? await gather(ctx, false, true) : [];
+  let teamRepos: string[] = [];
+  try {
+    teamRepos = await resolveTeamRepos(ctx);
+  } catch {
+    /* discovery error is surfaced by gather() below */
+  }
+  const teamG = teamRepos.length ? await gather(ctx, true, false) : { pool: [], errors: {} };
+  const orgG = ctx.orgRepo ? await gather(ctx, false, true) : { pool: [], errors: {} };
   const activeOf = (arr: Array<{ item: KnowledgeItem }>) =>
     arr.filter((p) => (p.item.status || "active") === "active").length;
+  const errors = { ...teamG.errors, ...orgG.errors };
   return {
     server: "cambium-remote",
     configured: {
@@ -164,9 +192,10 @@ export async function status(ctx: Ctx): Promise<unknown> {
     },
     counts: {
       team_repos: teamRepos.length,
-      team_active: activeOf(team),
-      org_active: activeOf(org),
+      team_active: activeOf(teamG.pool),
+      org_active: activeOf(orgG.pool),
     },
+    ...(Object.keys(errors).length ? { errors } : {}),
     note: "Read-only recall Worker; team repos auto-discovered. Writes (endorse/promote/distill) are desktop-only.",
   };
 }
